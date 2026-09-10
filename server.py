@@ -1,3 +1,4 @@
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import random
@@ -70,7 +71,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
 
-    server = ThreadingHTTPServer(("0.0.0.0", 8080), Handler)
+    server = ThreadingHTTPServer(("0.0.0.0", int(os.environ.get("PORT", 8080))), Handler)
 
     print("QTXBot API is running on port 8080")
 
