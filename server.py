@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # Binance public market-data API
 BINANCE_URL = (
-    "https://api.binance.com/api/v3/klines"
+    "https://data-api.binance.vision/api/v3/klines"
     "?symbol={symbol}&interval=1m&limit=100"
 )
 
