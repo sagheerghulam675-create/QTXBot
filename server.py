@@ -118,18 +118,18 @@ def analyze_market(candles):
         candle = "NEUTRAL"
 
     strong_call = (
-        score >= 4
+        score >= 3
         and ema9 > ema21
         and price > ema21
-        and 50 < rsi < 68
+        and rsi > 50
         and momentum > 0
     )
 
     strong_put = (
-        score <= -4
+        score <= -3
         and ema9 < ema21
         and price < ema21
-        and 32 < rsi < 50
+        and rsi < 50
         and momentum < 0
     )
 
