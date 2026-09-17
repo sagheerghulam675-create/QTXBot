@@ -1,4 +1,6 @@
 import os
+import threading
+import time
 import json
 import urllib.request
 from datetime import datetime
@@ -73,77 +75,163 @@ def calculate_rsi(values, period=14):
 def analyze_market(candles):
     closes = [c["close"] for c in candles]
 
+    if len(closes) < 30:
+        raise ValueError("Not enough market candles")
+
     price = closes[-1]
     ema9 = ema(closes, 9)
     ema21 = ema(closes, 21)
     rsi = calculate_rsi(closes, 14)
+
+    if ema9 is None or ema21 is None:
+        raise ValueError("EMA calculation unavailable")
+
+    # Short-term momentum
     momentum = closes[-1] - closes[-6]
 
     last_open = candles[-1]["open"]
     last_close = candles[-1]["close"]
+    last_high = candles[-1]["high"]
+    last_low = candles[-1]["low"]
 
     score = 0
 
+    # -------------------------------------------------
+    # 1. MAIN TREND
+    # -------------------------------------------------
     if ema9 > ema21:
-        score += 2
         trend = "BULLISH"
+        score += 2
     elif ema9 < ema21:
-        score -= 2
         trend = "BEARISH"
+        score -= 2
     else:
         trend = "NEUTRAL"
 
+    # -------------------------------------------------
+    # 2. PRICE LOCATION
+    # -------------------------------------------------
     if price > ema21:
         score += 1
     elif price < ema21:
         score -= 1
 
-    if 50 < rsi < 68:
-        score += 1
-    elif 32 < rsi < 50:
-        score -= 1
+    # -------------------------------------------------
+    # 3. EMA GAP
+    # Require meaningful separation.
+    # -------------------------------------------------
+    ema_gap = abs(ema9 - ema21) / ema21 * 100
 
+    if ema_gap >= 0.03:
+        if ema9 > ema21:
+            score += 1
+        elif ema9 < ema21:
+            score -= 1
+
+    # -------------------------------------------------
+    # 4. RSI
+    # Avoid chasing extreme conditions.
+    # -------------------------------------------------
+    if 52 <= rsi <= 68:
+        score += 1
+    elif 32 <= rsi <= 48:
+        score -= 1
+    elif rsi > 75:
+        score -= 1
+    elif rsi < 25:
+        score += 1
+
+    # -------------------------------------------------
+    # 5. MOMENTUM
+    # -------------------------------------------------
     if momentum > 0:
         score += 1
     elif momentum < 0:
         score -= 1
 
+    # -------------------------------------------------
+    # 6. LAST CANDLE
+    # -------------------------------------------------
+    candle_range = last_high - last_low
+    candle_body = abs(last_close - last_open)
+
     if last_close > last_open:
         candle = "BULLISH"
-        score += 1
+
+        if candle_range > 0 and candle_body / candle_range >= 0.55:
+            score += 1
+
     elif last_close < last_open:
         candle = "BEARISH"
-        score -= 1
+
+        if candle_range > 0 and candle_body / candle_range >= 0.55:
+            score -= 1
+
     else:
         candle = "NEUTRAL"
 
-    strong_call = (
-        score >= 3
-        and ema9 > ema21
+    # -------------------------------------------------
+    # 7. CONFIRMATION FILTERS
+    # -------------------------------------------------
+    bullish_confirmed = (
+        ema9 > ema21
         and price > ema21
-        and rsi > 50
         and momentum > 0
+        and 50 < rsi < 70
+        and ema_gap >= 0.03
     )
 
-    strong_put = (
-        score <= -3
-        and ema9 < ema21
+    bearish_confirmed = (
+        ema9 < ema21
         and price < ema21
-        and rsi < 50
         and momentum < 0
+        and 30 < rsi < 50
+        and ema_gap >= 0.03
     )
 
-    if strong_call:
+    # Candle direction must also agree when a real body exists.
+    bullish_candle_ok = (
+        candle == "BULLISH"
+        and candle_range > 0
+        and candle_body / candle_range >= 0.55
+    )
+
+    bearish_candle_ok = (
+        candle == "BEARISH"
+        and candle_range > 0
+        and candle_body / candle_range >= 0.55
+    )
+
+    if (
+        score >= 6
+        and bullish_confirmed
+        and bullish_candle_ok
+    ):
         signal = "CALL"
-    elif strong_put:
+
+    elif (
+        score <= -6
+        and bearish_confirmed
+        and bearish_candle_ok
+    ):
         signal = "PUT"
+
     else:
         signal = "NO SIGNAL"
 
-    if signal in ("CALL", "PUT"):
-        confidence = 60 + min((abs(score) - 4) * 5, 20)
+    # -------------------------------------------------
+    # 8. CONFIDENCE
+    # Confidence is an analysis-strength metric,
+    # not a guarantee of outcome.
+    # -------------------------------------------------
+    if signal == "CALL":
+        confidence = min(90, 70 + (score - 6) * 5)
+
+    elif signal == "PUT":
+        confidence = min(90, 70 + (abs(score) - 6) * 5)
+
     else:
-        confidence = 50 + min(abs(score) * 3, 9)
+        confidence = 0
 
     return {
         "signal": signal,
@@ -155,8 +243,46 @@ def analyze_market(candles):
         "momentum": round(momentum, 8),
         "score": score,
         "trend": trend,
-        "candle": candle
+        "candle": candle,
+        "ema_gap": round(ema_gap, 4)
     }
+
+
+latest_signals = {}
+
+def background_monitor():
+    pairs = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT"]
+    pair_map = {
+        "BTC/USDT": "BTCUSDT",
+        "ETH/USDT": "ETHUSDT",
+        "BNB/USDT": "BNBUSDT",
+        "SOL/USDT": "SOLUSDT",
+        "XRP/USDT": "XRPUSDT"
+    }
+
+    while True:
+        for pair in pairs:
+            try:
+                candles = get_candles(pair_map[pair])
+                result = analyze_market(candles)
+                latest_signals[pair] = {
+                    **result,
+                    "pair": pair,
+                    "time": datetime.now().strftime("%H:%M:%S"),
+                    "data_verified": True,
+                    "source": "Binance live market candles"
+                }
+            except Exception as e:
+                latest_signals[pair] = {
+                    "pair": pair,
+                    "signal": "NO SIGNAL",
+                    "confidence": 0,
+                    "data_verified": False,
+                    "status": "DATA ERROR",
+                    "error": str(e),
+                    "time": datetime.now().strftime("%H:%M:%S")
+                }
+        time.sleep(60)
 
 class Handler(BaseHTTPRequestHandler):
 
@@ -266,7 +392,7 @@ class Handler(BaseHTTPRequestHandler):
                     "candle": result["candle"],
                     "data_verified": True,
                     "source": "Binance live market candles",
-                    "analysis": "EMA9 + EMA21 + RSI + Momentum + Trend Filter",
+                    "analysis": "EMA9 + EMA21 + RSI + Momentum + EMA Gap + Candle Strength",
                     "status": "LIVE"
                 })
 
@@ -298,6 +424,12 @@ server = ThreadingHTTPServer(
     ("0.0.0.0", port),
     Handler
 )
+
+monitor_thread = threading.Thread(
+    target=background_monitor,
+    daemon=True
+)
+monitor_thread.start()
 
 print("QTXBot Live Analysis API is running on port", port)
 
