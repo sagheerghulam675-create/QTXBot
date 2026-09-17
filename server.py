@@ -7,6 +7,71 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BINANCE_URL = "https://data-api.binance.vision/api/v3/klines?symbol={}&interval=1m&limit=100"
+BINANCE_EXCHANGE_INFO_URL = "https://data-api.binance.vision/api/v3/exchangeInfo"
+
+_pair_cache = []
+_pair_cache_time = 0
+_PAIR_CACHE_SECONDS = 3600
+
+
+def get_binance_usdt_pairs():
+    global _pair_cache, _pair_cache_time
+
+    now = time.time()
+    if _pair_cache and now - _pair_cache_time < _PAIR_CACHE_SECONDS:
+        return _pair_cache
+
+    req = urllib.request.Request(
+        BINANCE_EXCHANGE_INFO_URL,
+        headers={"User-Agent": "QTXBot/1.0"}
+    )
+
+    with urllib.request.urlopen(req, timeout=10) as response:
+        data = json.loads(response.read().decode())
+
+    pairs = []
+
+    for item in data.get("symbols", []):
+        if item.get("status") != "TRADING":
+            continue
+
+        if item.get("quoteAsset") != "USDT":
+            continue
+
+        if item.get("isSpotTradingAllowed") is False:
+            continue
+
+        base = item.get("baseAsset")
+        symbol = item.get("symbol")
+
+        if base and symbol:
+            pairs.append({
+                "pair": f"{base}/USDT",
+                "symbol": symbol
+            })
+
+    pairs.sort(key=lambda x: x["pair"])
+
+    _pair_cache = pairs
+    _pair_cache_time = now
+
+    return pairs
+
+
+def get_binance_symbol(pair):
+    pair = str(pair).upper().strip()
+
+    if "/" in pair:
+        wanted = pair
+    else:
+        wanted = pair[:-4] + "/USDT" if pair.endswith("USDT") else pair
+
+    for item in get_binance_usdt_pairs():
+        if item["pair"] == wanted:
+            return item["symbol"]
+
+    return None
+
 
 def get_candles(symbol):
     req = urllib.request.Request(
@@ -173,11 +238,14 @@ def analyze_market(candles):
     # -------------------------------------------------
     # 7. CONFIRMATION FILTERS
     # -------------------------------------------------
+    # Balanced RSI confirmation:
+    # Allow moderately overbought/oversold conditions when
+    # the trend, momentum, EMA gap and candle all agree.
     bullish_confirmed = (
         ema9 > ema21
         and price > ema21
         and momentum > 0
-        and 50 < rsi < 70
+        and 50 < rsi < 80
         and ema_gap >= 0.03
     )
 
@@ -185,7 +253,7 @@ def analyze_market(candles):
         ema9 < ema21
         and price < ema21
         and momentum < 0
-        and 30 < rsi < 50
+        and 20 < rsi < 50
         and ema_gap >= 0.03
     )
 
@@ -202,18 +270,66 @@ def analyze_market(candles):
         and candle_body / candle_range >= 0.55
     )
 
-    if (
-        score >= 6
-        and bullish_confirmed
-        and bullish_candle_ok
-    ):
+    # -------------------------------------------------
+    # 7. BALANCED SIGNAL DECISION
+    # -------------------------------------------------
+    # Trend + price + momentum remain important.
+    # Candle is supporting evidence, not a hard blocker.
+    # This avoids excessive NO SIGNAL results while
+    # still rejecting weak/conflicting setups.
+
+    bullish_setup = (
+        ema9 > ema21
+        and price > ema21
+        and momentum > 0
+        and 50 < rsi < 75
+    )
+
+    bearish_setup = (
+        ema9 < ema21
+        and price < ema21
+        and momentum < 0
+        and 25 < rsi < 50
+    )
+
+    bullish_points = 0
+    bearish_points = 0
+
+    if ema9 > ema21:
+        bullish_points += 1
+    elif ema9 < ema21:
+        bearish_points += 1
+
+    if price > ema21:
+        bullish_points += 1
+    elif price < ema21:
+        bearish_points += 1
+
+    if momentum > 0:
+        bullish_points += 1
+    elif momentum < 0:
+        bearish_points += 1
+
+    if ema_gap >= 0.03:
+        if ema9 > ema21:
+            bullish_points += 1
+        elif ema9 < ema21:
+            bearish_points += 1
+
+    if 50 < rsi < 75:
+        bullish_points += 1
+    elif 25 < rsi < 50:
+        bearish_points += 1
+
+    if bullish_candle_ok:
+        bullish_points += 1
+    elif bearish_candle_ok:
+        bearish_points += 1
+
+    if bullish_setup and bullish_points >= 4 and bullish_points > bearish_points:
         signal = "CALL"
 
-    elif (
-        score <= -6
-        and bearish_confirmed
-        and bearish_candle_ok
-    ):
+    elif bearish_setup and bearish_points >= 4 and bearish_points > bullish_points:
         signal = "PUT"
 
     else:
@@ -221,14 +337,14 @@ def analyze_market(candles):
 
     # -------------------------------------------------
     # 8. CONFIDENCE
-    # Confidence is an analysis-strength metric,
+    # Confidence represents analysis strength,
     # not a guarantee of outcome.
     # -------------------------------------------------
     if signal == "CALL":
-        confidence = min(90, 70 + (score - 6) * 5)
+        confidence = min(90, 65 + (bullish_points - 4) * 8)
 
     elif signal == "PUT":
-        confidence = min(90, 70 + (abs(score) - 6) * 5)
+        confidence = min(90, 65 + (bearish_points - 4) * 8)
 
     else:
         confidence = 0
@@ -315,6 +431,25 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        if self.path == "/api/pairs":
+            try:
+                pairs = get_binance_usdt_pairs()
+                self.send_json({
+                    "status": "ok",
+                    "source": "Binance live exchange info",
+                    "count": len(pairs),
+                    "pairs": [x["pair"] for x in pairs]
+                })
+            except Exception as e:
+                self.send_json({
+                    "status": "error",
+                    "count": 0,
+                    "pairs": [],
+                    "error": "Unable to load market pairs",
+                    "details": str(e)
+                }, 503)
+            return
+
         if self.path.startswith("/api/signal"):
 
             from urllib.parse import urlparse, parse_qs
@@ -347,20 +482,7 @@ class Handler(BaseHTTPRequestHandler):
                 }, 400)
                 return
 
-            pair_map = {
-                "BTC/USDT": "BTCUSDT",
-                "BTCUSDT": "BTCUSDT",
-                "ETH/USDT": "ETHUSDT",
-                "ETHUSDT": "ETHUSDT",
-                "BNB/USDT": "BNBUSDT",
-                "BNBUSDT": "BNBUSDT",
-                "SOL/USDT": "SOLUSDT",
-                "SOLUSDT": "SOLUSDT",
-                "XRP/USDT": "XRPUSDT",
-                "XRPUSDT": "XRPUSDT"
-            }
-
-            symbol = pair_map.get(pair)
+            symbol = get_binance_symbol(pair)
 
             if symbol is None:
                 self.send_json({
