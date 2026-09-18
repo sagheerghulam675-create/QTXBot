@@ -73,23 +73,20 @@ def get_binance_symbol(pair):
     return None
 
 
-# Binance market-data endpoints.
-# data-api is kept first, with official API endpoints as fallbacks.
-BINANCE_KLINE_BASES = [
-    "https://api-gcp.binance.com",
-    "https://data-api.binance.vision",
-    "https://api.binance.com",
-    "https://api1.binance.com",
-    "https://api2.binance.com",
-    "https://api3.binance.com",
-    "https://api4.binance.com"
-]
+# Binance market-data endpoint.
+# Use one official market-data endpoint and respect Binance rate-limit bans.
+BINANCE_KLINE_BASE = "https://data-api.binance.vision"
 
 _candle_cache = {}
 _CANDLE_CACHE_SECONDS = 15
 
+# If Binance returns 418/429, do not keep rotating endpoints.
+_binance_backoff_until = 0
+
 
 def get_candles(symbol):
+    global _binance_backoff_until
+
     now = time.time()
 
     # Avoid repeatedly requesting the same 100 candles.
@@ -99,52 +96,88 @@ def get_candles(symbol):
         if now - cached_time < _CANDLE_CACHE_SECONDS:
             return cached_data
 
-    last_error = None
-
-    for base_url in BINANCE_KLINE_BASES:
-        url = (
-            f"{base_url}/api/v3/klines"
-            f"?symbol={symbol}&interval=1m&limit=100"
+    # Binance has temporarily blocked this server IP.
+    if now < _binance_backoff_until:
+        remaining = int(_binance_backoff_until - now)
+        raise RuntimeError(
+            f"Binance temporarily unavailable; retry after {remaining}s"
         )
 
-        try:
-            req = urllib.request.Request(
-                url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 QTXBot/1.0",
-                    "Accept": "application/json"
-                }
+    url = (
+        f"{BINANCE_KLINE_BASE}/api/v3/klines"
+        f"?symbol={symbol}&interval=1m&limit=100"
+    )
+
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "QTXBot/1.0",
+                "Accept": "application/json"
+            }
+        )
+
+        with urllib.request.urlopen(req, timeout=8) as response:
+            data = json.loads(response.read().decode())
+
+        if not isinstance(data, list) or len(data) < 30:
+            raise ValueError("Not enough market candles")
+
+        candles = [
+            {
+                "open": float(x[1]),
+                "high": float(x[2]),
+                "low": float(x[3]),
+                "close": float(x[4]),
+                "volume": float(x[5])
+            }
+            for x in data
+        ]
+
+        _candle_cache[symbol] = (time.time(), candles)
+        return candles
+
+    except urllib.error.HTTPError as e:
+        if e.code in (418, 429):
+            retry_after = None
+
+            try:
+                retry_after = e.headers.get("Retry-After")
+            except Exception:
+                pass
+
+            try:
+                wait_seconds = int(float(retry_after))
+            except (TypeError, ValueError):
+                wait_seconds = 300
+
+            # Never hammer Binance again immediately.
+            wait_seconds = max(60, min(wait_seconds, 3600))
+            _binance_backoff_until = time.time() + wait_seconds
+
+            print(
+                f"BINANCE RATE LIMIT: HTTP {e.code}; "
+                f"backing off for {wait_seconds}s",
+                flush=True
             )
 
-            with urllib.request.urlopen(req, timeout=8) as response:
-                data = json.loads(response.read().decode())
+            raise RuntimeError(
+                f"Binance rate limited (HTTP {e.code}); "
+                f"retry after {wait_seconds}s"
+            )
 
-            if not isinstance(data, list) or len(data) < 30:
-                raise ValueError("Not enough market candles")
+        print(
+            f"BINANCE CANDLE ERROR: HTTP {e.code} -> {e}",
+            flush=True
+        )
+        raise RuntimeError(f"Binance candle HTTP error: {e.code}")
 
-            candles = [
-                {
-                    "open": float(x[1]),
-                    "high": float(x[2]),
-                    "low": float(x[3]),
-                    "close": float(x[4]),
-                    "volume": float(x[5])
-                }
-                for x in data
-            ]
-
-            _candle_cache[symbol] = (time.time(), candles)
-
-            return candles
-
-        except Exception as e:
-            last_error = e
-            print(f"BINANCE CANDLE ERROR: {base_url} -> {type(e).__name__}: {e}", flush=True)
-            continue
-
-    raise RuntimeError(
-        f"All Binance market-data endpoints failed: {last_error}"
-    )
+    except Exception as e:
+        print(
+            f"BINANCE CANDLE ERROR: {type(e).__name__}: {e}",
+            flush=True
+        )
+        raise RuntimeError(f"Binance market-data unavailable: {e}")
 
 
 def ema(values, period):
