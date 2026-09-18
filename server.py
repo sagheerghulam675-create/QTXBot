@@ -138,6 +138,7 @@ def get_candles(symbol):
 
         except Exception as e:
             last_error = e
+            print(f"BINANCE CANDLE ERROR: {base_url} -> {type(e).__name__}: {e}", flush=True)
             continue
 
     raise RuntimeError(
