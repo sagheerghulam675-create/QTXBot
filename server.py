@@ -76,6 +76,7 @@ def get_binance_symbol(pair):
 # Binance market-data endpoints.
 # data-api is kept first, with official API endpoints as fallbacks.
 BINANCE_KLINE_BASES = [
+    "https://api-gcp.binance.com",
     "https://data-api.binance.vision",
     "https://api.binance.com",
     "https://api1.binance.com",
