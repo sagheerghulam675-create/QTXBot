@@ -160,8 +160,10 @@ def get_candles(symbol):
             except (TypeError, ValueError):
                 wait_seconds = 300
 
-            # Never hammer Binance again immediately.
-            wait_seconds = max(60, min(wait_seconds, 3600))
+            # Keep Binance protection short so QTXBot can recover.
+            # Do not allow a long Retry-After value to disable signals
+            # for many minutes.
+            wait_seconds = max(30, min(wait_seconds, 60))
             _binance_backoff_until = time.time() + wait_seconds
 
             print(
