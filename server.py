@@ -18,50 +18,93 @@ def get_binance_usdt_pairs():
     global _pair_cache, _pair_cache_time
 
     now = time.time()
+
     if _pair_cache and now - _pair_cache_time < _PAIR_CACHE_SECONDS:
         return _pair_cache
 
     req = urllib.request.Request(
         BINANCE_EXCHANGE_INFO_URL,
-        headers={"User-Agent": "QTXBot/1.0"}
+        headers={
+            "User-Agent": "QTXBot/1.0",
+            "Accept": "application/json"
+        }
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode())
+
+        pairs = []
+
+        for item in data.get("symbols", []):
+            if item.get("status") != "TRADING":
+                continue
+
+            if item.get("quoteAsset") != "USDT":
+                continue
+
+            if item.get("isSpotTradingAllowed") is False:
+                continue
+
+            base = item.get("baseAsset")
+            symbol = item.get("symbol")
+
+            if base and symbol:
+                pairs.append({
+                    "pair": f"{base}/USDT",
+                    "symbol": symbol
+                })
+
+        pairs.sort(key=lambda x: x["pair"])
+
+        if pairs:
+            _pair_cache = pairs
+            _pair_cache_time = now
+
+            print(
+                f"PAIR LIST: Binance live exchangeInfo ({len(pairs)} pairs)",
+                flush=True
+            )
+
+            return pairs
+
+        raise RuntimeError("Binance returned empty pair list")
+
     except Exception as e:
-        print("Binance exchangeInfo unavailable:", e)
-        if _pair_cache:
-            return _pair_cache
-        return []
+        print(
+            f"PAIR LIST ERROR: {type(e).__name__}: {e}",
+            flush=True
+        )
 
-    pairs = []
+        # Keep QTXBot usable when Binance exchangeInfo is unavailable.
+        # These are common USDT pairs and are used only as a local fallback.
+        fallback_bases = [
+            "BTC", "ETH", "BNB", "SOL", "XRP",
+            "ADA", "DOGE", "TRX", "LINK", "AVAX",
+            "DOT", "LTC", "BCH", "UNI", "ATOM",
+            "ETC", "XLM", "FIL", "APT", "ARB",
+            "OP", "NEAR", "ALGO", "AAVE", "SAND",
+            "MANA", "EGLD", "ICP", "HBAR", "VET"
+        ]
 
-    for item in data.get("symbols", []):
-        if item.get("status") != "TRADING":
-            continue
-
-        if item.get("quoteAsset") != "USDT":
-            continue
-
-        if item.get("isSpotTradingAllowed") is False:
-            continue
-
-        base = item.get("baseAsset")
-        symbol = item.get("symbol")
-
-        if base and symbol:
-            pairs.append({
+        fallback_pairs = [
+            {
                 "pair": f"{base}/USDT",
-                "symbol": symbol
-            })
+                "symbol": f"{base}USDT"
+            }
+            for base in fallback_bases
+        ]
 
-    pairs.sort(key=lambda x: x["pair"])
+        _pair_cache = fallback_pairs
+        _pair_cache_time = now
 
-    _pair_cache = pairs
-    _pair_cache_time = now
+        print(
+            f"PAIR LIST FALLBACK: local list ({len(fallback_pairs)} pairs)",
+            flush=True
+        )
 
-    return pairs
+        return fallback_pairs
+
 
 
 def get_binance_symbol(pair):
@@ -105,19 +148,25 @@ def get_candles(symbol):
         if now - cached_time < _CANDLE_CACHE_SECONDS:
             return cached_data
 
-    # Binance has temporarily blocked this server IP.
-    if now < _binance_backoff_until:
-        remaining = int(_binance_backoff_until - now)
-        raise RuntimeError(
-            f"Binance temporarily unavailable; retry after {remaining}s"
+    def get_coinbase_symbol(binance_symbol):
+        symbol = str(binance_symbol).upper().strip()
+
+        if symbol.endswith("USDT"):
+            base = symbol[:-4]
+        else:
+            base = symbol
+
+        # Coinbase USD products available for common Binance assets.
+        return f"{base}-USD"
+
+    def get_coinbase_candles(binance_symbol):
+        product = get_coinbase_symbol(binance_symbol)
+
+        url = (
+            "https://api.exchange.coinbase.com/products/"
+            f"{product}/candles?granularity=60"
         )
 
-    url = (
-        f"{BINANCE_KLINE_BASE}/api/v3/klines"
-        f"?symbol={symbol}&interval=1m&limit=100"
-    )
-
-    try:
         req = urllib.request.Request(
             url,
             headers={
@@ -126,70 +175,117 @@ def get_candles(symbol):
             }
         )
 
-        with urllib.request.urlopen(req, timeout=8) as response:
+        with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode())
 
         if not isinstance(data, list) or len(data) < 30:
-            raise ValueError("Not enough market candles")
+            raise ValueError(
+                f"Coinbase returned insufficient candles for {product}"
+            )
+
+        # Coinbase format:
+        # [time, low, high, open, close, volume]
+        #
+        # Sort oldest -> newest because the signal engine expects
+        # chronological candle data.
+        data = sorted(data, key=lambda x: x[0])
 
         candles = [
             {
-                "open": float(x[1]),
+                "open": float(x[3]),
                 "high": float(x[2]),
-                "low": float(x[3]),
+                "low": float(x[1]),
                 "close": float(x[4]),
                 "volume": float(x[5])
             }
             for x in data
         ]
 
-        _candle_cache[symbol] = (time.time(), candles)
         return candles
 
-    except urllib.error.HTTPError as e:
-        if e.code in (418, 429):
-            retry_after = None
+    # ------------------------------------------------------------
+    # PRIMARY: Binance
+    # ------------------------------------------------------------
+    try:
+        if now >= _binance_backoff_until:
+            url = (
+                f"{BINANCE_KLINE_BASE}/api/v3/klines"
+                f"?symbol={symbol}&interval=1m&limit=100"
+            )
 
-            try:
-                retry_after = e.headers.get("Retry-After")
-            except Exception:
-                pass
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "QTXBot/1.0",
+                    "Accept": "application/json"
+                }
+            )
 
-            try:
-                wait_seconds = int(float(retry_after))
-            except (TypeError, ValueError):
-                wait_seconds = 300
+            with urllib.request.urlopen(req, timeout=8) as response:
+                data = json.loads(response.read().decode())
 
-            # Keep Binance protection short so QTXBot can recover.
-            # Do not allow a long Retry-After value to disable signals
-            # for many minutes.
-            wait_seconds = max(30, min(wait_seconds, 60))
-            _binance_backoff_until = time.time() + wait_seconds
+            if not isinstance(data, list) or len(data) < 30:
+                raise ValueError("Not enough Binance market candles")
+
+            candles = [
+                {
+                    "open": float(x[1]),
+                    "high": float(x[2]),
+                    "low": float(x[3]),
+                    "close": float(x[4]),
+                    "volume": float(x[5])
+                }
+                for x in data
+            ]
+
+            _candle_cache[symbol] = (time.time(), candles)
 
             print(
-                f"BINANCE RATE LIMIT: HTTP {e.code}; "
-                f"backing off for {wait_seconds}s",
+                f"MARKET DATA: Binance live candles for {symbol}",
                 flush=True
             )
 
-            raise RuntimeError(
-                f"Binance rate limited (HTTP {e.code}); "
-                f"retry after {wait_seconds}s"
-            )
+            return candles
 
+    except urllib.error.HTTPError as e:
         print(
             f"BINANCE CANDLE ERROR: HTTP {e.code} -> {e}",
             flush=True
         )
-        raise RuntimeError(f"Binance candle HTTP error: {e.code}")
+
+        if e.code in (418, 429):
+            _binance_backoff_until = time.time() + 30
 
     except Exception as e:
         print(
             f"BINANCE CANDLE ERROR: {type(e).__name__}: {e}",
             flush=True
         )
-        raise RuntimeError(f"Binance market-data unavailable: {e}")
 
+    # ------------------------------------------------------------
+    # FALLBACK: Coinbase
+    # ------------------------------------------------------------
+    try:
+        candles = get_coinbase_candles(symbol)
+
+        _candle_cache[symbol] = (time.time(), candles)
+
+        print(
+            f"MARKET DATA FALLBACK: Coinbase live candles for {symbol}",
+            flush=True
+        )
+
+        return candles
+
+    except Exception as e:
+        print(
+            f"COINBASE FALLBACK ERROR: {type(e).__name__}: {e}",
+            flush=True
+        )
+
+        raise RuntimeError(
+            f"Market data unavailable: Binance and Coinbase failed"
+        )
 
 def ema(values, period):
     if len(values) < period:
