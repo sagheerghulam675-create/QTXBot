@@ -67,14 +67,17 @@ def get_binance_usdt_pairs():
 def get_binance_symbol(pair):
     pair = str(pair).upper().strip()
 
+    # Normalize common formats:
+    # BTC/USDT -> BTCUSDT
+    # BTCUSDT  -> BTCUSDT
     if "/" in pair:
-        wanted = pair
-    else:
-        wanted = pair[:-4] + "/USDT" if pair.endswith("USDT") else pair
+        base, quote = pair.split("/", 1)
+        if quote == "USDT" and base:
+            return base + "USDT"
+        return None
 
-    for item in get_binance_usdt_pairs():
-        if item["pair"] == wanted:
-            return item["symbol"]
+    if pair.endswith("USDT") and len(pair) > 4:
+        return pair
 
     return None
 
