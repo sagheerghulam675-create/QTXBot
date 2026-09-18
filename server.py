@@ -73,27 +73,77 @@ def get_binance_symbol(pair):
     return None
 
 
+# Binance market-data endpoints.
+# data-api is kept first, with official API endpoints as fallbacks.
+BINANCE_KLINE_BASES = [
+    "https://data-api.binance.vision",
+    "https://api.binance.com",
+    "https://api1.binance.com",
+    "https://api2.binance.com",
+    "https://api3.binance.com",
+    "https://api4.binance.com"
+]
+
+_candle_cache = {}
+_CANDLE_CACHE_SECONDS = 15
+
+
 def get_candles(symbol):
-    req = urllib.request.Request(
-        BINANCE_URL.format(symbol),
-        headers={"User-Agent": "QTXBot/1.0"}
+    now = time.time()
+
+    # Avoid repeatedly requesting the same 100 candles.
+    cached = _candle_cache.get(symbol)
+    if cached:
+        cached_time, cached_data = cached
+        if now - cached_time < _CANDLE_CACHE_SECONDS:
+            return cached_data
+
+    last_error = None
+
+    for base_url in BINANCE_KLINE_BASES:
+        url = (
+            f"{base_url}/api/v3/klines"
+            f"?symbol={symbol}&interval=1m&limit=100"
+        )
+
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 QTXBot/1.0",
+                    "Accept": "application/json"
+                }
+            )
+
+            with urllib.request.urlopen(req, timeout=8) as response:
+                data = json.loads(response.read().decode())
+
+            if not isinstance(data, list) or len(data) < 30:
+                raise ValueError("Not enough market candles")
+
+            candles = [
+                {
+                    "open": float(x[1]),
+                    "high": float(x[2]),
+                    "low": float(x[3]),
+                    "close": float(x[4]),
+                    "volume": float(x[5])
+                }
+                for x in data
+            ]
+
+            _candle_cache[symbol] = (time.time(), candles)
+
+            return candles
+
+        except Exception as e:
+            last_error = e
+            continue
+
+    raise RuntimeError(
+        f"All Binance market-data endpoints failed: {last_error}"
     )
-    with urllib.request.urlopen(req, timeout=10) as response:
-        data = json.loads(response.read().decode())
 
-    if len(data) < 30:
-        raise ValueError("Not enough market candles")
-
-    return [
-        {
-            "open": float(x[1]),
-            "high": float(x[2]),
-            "low": float(x[3]),
-            "close": float(x[4]),
-            "volume": float(x[5])
-        }
-        for x in data
-    ]
 
 def ema(values, period):
     if len(values) < period:
