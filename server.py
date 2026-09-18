@@ -26,8 +26,14 @@ def get_binance_usdt_pairs():
         headers={"User-Agent": "QTXBot/1.0"}
     )
 
-    with urllib.request.urlopen(req, timeout=10) as response:
-        data = json.loads(response.read().decode())
+    try:
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+    except Exception as e:
+        print("Binance exchangeInfo unavailable:", e)
+        if _pair_cache:
+            return _pair_cache
+        return []
 
     pairs = []
 
