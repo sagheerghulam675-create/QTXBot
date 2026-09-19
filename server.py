@@ -597,6 +597,39 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        if self.path.startswith("/api/activate"):
+            try:
+                from urllib.parse import urlparse, parse_qs
+
+                qs = parse_qs(urlparse(self.path).query)
+                key = qs.get("key", [""])[0].strip().upper()
+
+                valid_keys = {
+                    "QTX-8F4K-29PM": True,
+                }
+
+                if valid_keys.get(key) is True:
+                    self.send_json({
+                        "status": "ok",
+                        "activated": True,
+                        "message": "QTXBot activated successfully"
+                    })
+                else:
+                    self.send_json({
+                        "status": "error",
+                        "activated": False,
+                        "message": "Invalid or disabled activation key"
+                    })
+
+            except Exception as e:
+                self.send_json({
+                    "status": "error",
+                    "activated": False,
+                    "message": str(e)
+                })
+
+            return
+
         if self.path == "/api/pairs":
             try:
                 pairs = get_binance_usdt_pairs()
