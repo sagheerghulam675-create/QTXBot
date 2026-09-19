@@ -13,6 +13,10 @@ _pair_cache = []
 _pair_cache_time = 0
 _PAIR_CACHE_SECONDS = 3600
 
+# QTXBot master control
+BOT_ENABLED = True
+ADMIN_KEY = os.environ.get("QTX_ADMIN_KEY", "").strip().upper()
+
 
 def get_binance_usdt_pairs():
     global _pair_cache, _pair_cache_time
@@ -589,6 +593,53 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
 
+        # ---------------- ADMIN CONTROL ----------------
+        if self.path.startswith("/api/admin/"):
+            from urllib.parse import urlparse, parse_qs
+
+            query = parse_qs(urlparse(self.path).query)
+            admin_key = query.get("key", [""])[0].strip().upper()
+
+            if not ADMIN_KEY or admin_key != ADMIN_KEY:
+                self.send_json({
+                    "status": "error",
+                    "message": "Admin access denied"
+                }, 403)
+                return
+
+            global BOT_ENABLED
+
+            if self.path.startswith("/api/admin/status"):
+                self.send_json({
+                    "status": "ok",
+                    "bot_enabled": BOT_ENABLED
+                })
+                return
+
+            if self.path.startswith("/api/admin/enable"):
+                BOT_ENABLED = True
+                self.send_json({
+                    "status": "ok",
+                    "bot_enabled": True,
+                    "message": "QTXBot enabled"
+                })
+                return
+
+            if self.path.startswith("/api/admin/disable"):
+                BOT_ENABLED = False
+                self.send_json({
+                    "status": "ok",
+                    "bot_enabled": False,
+                    "message": "QTXBot disabled"
+                })
+                return
+
+            self.send_json({
+                "status": "error",
+                "message": "Unknown admin action"
+            }, 404)
+            return
+
         if self.path == "/":
             self.send_json({
                 "status": "ok",
@@ -655,6 +706,34 @@ class Handler(BaseHTTPRequestHandler):
             from urllib.parse import urlparse, parse_qs
 
             query = parse_qs(urlparse(self.path).query)
+
+            access_key = query.get("key", [""])[0].strip().upper()
+
+            if not BOT_ENABLED:
+                self.send_json({
+                    "status": "disabled",
+                    "activated": False,
+                    "signal": "NO SIGNAL",
+                    "confidence": 0,
+                    "error": "Bot disabled by administrator",
+                    "message": "QTXBot is currently disabled"
+                }, 403)
+                return
+
+            valid_keys = {
+                "QTX-8F4K-29PM": True,
+            }
+
+            if valid_keys.get(access_key) is not True:
+                self.send_json({
+                    "status": "error",
+                    "activated": False,
+                    "signal": "NO SIGNAL",
+                    "confidence": 0,
+                    "error": "Access denied",
+                    "message": "Invalid or disabled activation key"
+                }, 403)
+                return
 
             pair = query.get("pair", ["BTC/USDT"])[0].upper()
             expiry = query.get("expiry", ["1 MIN"])[0].upper()
