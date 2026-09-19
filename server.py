@@ -19,93 +19,67 @@ def get_binance_usdt_pairs():
 
     now = time.time()
 
-    if _pair_cache and now - _pair_cache_time < _PAIR_CACHE_SECONDS:
+    # Short in-memory cache
+    if _pair_cache and (now - _pair_cache_time) < 3600:
         return _pair_cache
 
-    req = urllib.request.Request(
-        BINANCE_EXCHANGE_INFO_URL,
-        headers={
-            "User-Agent": "QTXBot/1.0",
-            "Accept": "application/json"
-        }
-    )
+    fallback = [
+        "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+        "ADAUSDT", "DOGEUSDT", "TRXUSDT", "LINKUSDT", "AVAXUSDT",
+        "DOTUSDT", "LTCUSDT", "BCHUSDT", "UNIUSDT", "ATOMUSDT",
+        "ETCUSDT", "XLMUSDT", "FILUSDT", "APTUSDT", "ARBUSDT",
+        "OPUSDT", "NEARUSDT", "ALGOUSDT", "AAVEUSDT", "SANDUSDT",
+        "MANAUSDT", "EGLDUSDT", "ICPUSDT", "HBARUSDT", "VETUSDT"
+    ]
 
     try:
-        with urllib.request.urlopen(req, timeout=5) as response:
+        req = urllib.request.Request(
+            BINANCE_EXCHANGE_INFO_URL,
+            headers={
+                "User-Agent": "QTXBot/1.0",
+                "Accept": "application/json"
+            }
+        )
+
+        with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode())
 
         pairs = []
 
         for item in data.get("symbols", []):
-            if item.get("status") != "TRADING":
-                continue
+            symbol = str(item.get("symbol", "")).upper()
+            status = str(item.get("status", "")).upper()
+            quote = str(item.get("quoteAsset", "")).upper()
 
-            if item.get("quoteAsset") != "USDT":
-                continue
+            if (
+                symbol.endswith("USDT")
+                and quote == "USDT"
+                and status == "TRADING"
+            ):
+                pairs.append(symbol)
 
-            if item.get("isSpotTradingAllowed") is False:
-                continue
-
-            base = item.get("baseAsset")
-            symbol = item.get("symbol")
-
-            if base and symbol:
-                pairs.append({
-                    "pair": f"{base}/USDT",
-                    "symbol": symbol
-                })
-
-        pairs.sort(key=lambda x: x["pair"])
+        pairs = sorted(set(pairs))
 
         if pairs:
             _pair_cache = pairs
             _pair_cache_time = now
-
-            print(
-                f"PAIR LIST: Binance live exchangeInfo ({len(pairs)} pairs)",
-                flush=True
-            )
-
+            print(f"PAIR LIST: Binance live exchange info ({len(pairs)} pairs)")
             return pairs
 
-        raise RuntimeError("Binance returned empty pair list")
+        print("PAIR LIST WARNING: Binance returned no USDT trading pairs")
 
     except Exception as e:
-        print(
-            f"PAIR LIST ERROR: {type(e).__name__}: {e}",
-            flush=True
-        )
+        print(f"PAIR LIST ERROR: {type(e).__name__}: {e}")
 
-        # Keep QTXBot usable when Binance exchangeInfo is unavailable.
-        # These are common USDT pairs and are used only as a local fallback.
-        fallback_bases = [
-            "BTC", "ETH", "BNB", "SOL", "XRP",
-            "ADA", "DOGE", "TRX", "LINK", "AVAX",
-            "DOT", "LTC", "BCH", "UNI", "ATOM",
-            "ETC", "XLM", "FIL", "APT", "ARB",
-            "OP", "NEAR", "ALGO", "AAVE", "SAND",
-            "MANA", "EGLD", "ICP", "HBAR", "VET"
-        ]
+    # Emergency fallback
+    if _pair_cache:
+        print(f"PAIR LIST CACHE: using previous cached list ({len(_pair_cache)} pairs)")
+        return _pair_cache
 
-        fallback_pairs = [
-            {
-                "pair": f"{base}/USDT",
-                "symbol": f"{base}USDT"
-            }
-            for base in fallback_bases
-        ]
-
-        _pair_cache = fallback_pairs
-        _pair_cache_time = now
-
-        print(
-            f"PAIR LIST FALLBACK: local list ({len(fallback_pairs)} pairs)",
-            flush=True
-        )
-
-        return fallback_pairs
-
-
+    print(f"PAIR LIST FALLBACK: using {len(fallback)} common USDT pairs")
+    _pair_cache = fallback
+    _pair_cache_time = now
+    return fallback
 
 def get_binance_symbol(pair):
     pair = str(pair).upper().strip()
@@ -626,11 +600,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/pairs":
             try:
                 pairs = get_binance_usdt_pairs()
+
                 self.send_json({
                     "status": "ok",
-                    "source": "Binance live exchange info",
+                    "source": "Binance live exchange info / cached fallback",
                     "count": len(pairs),
-                    "pairs": [x["pair"] for x in pairs]
+                    "pairs": pairs
                 })
             except Exception as e:
                 self.send_json({
